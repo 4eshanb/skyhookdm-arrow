@@ -29,6 +29,13 @@
 #include "parquet/arrow/reader.h"
 #include "parquet/arrow/writer.h"
 
+//added
+#include "skyhook/protocol/skyhook_protocol.h"
+#include "arrow/dataset/scanner.h"
+#include "arrow/result.h"
+#include "arrow/dataset/dataset_internal.h"
+//
+
 std::shared_ptr<skyhook::SkyhookFileFormat> GetSkyhookFormat() {
   // The constants below should match the parameters with
   // which the Ceph cluster is configured in integration_skyhook.sh.
@@ -85,36 +92,72 @@ std::shared_ptr<arrow::dataset::Dataset> GetDatasetFromPath(
   return GetDatasetFromDirectory(std::move(fs), std::move(format), std::move(path));
 }
 
-std::shared_ptr<arrow::dataset::Scanner> GetScannerFromDataset(
-    const std::shared_ptr<arrow::dataset::Dataset>& dataset,
-    std::vector<std::string> columns, arrow::compute::Expression filter,
-    bool use_threads) {
-  EXPECT_OK_AND_ASSIGN(auto scanner_builder, dataset->NewScan());
-
+std::shared_ptr<arrow::dataset::Scanner> GetScannerFromBuilder(
+    const std::shared_ptr<arrow::dataset::ScannerBuilder>& builder, std::vector<std::string> columns,
+    arrow::compute::Expression filter, bool use_threads) {
   if (!columns.empty()) {
-    ARROW_EXPECT_OK(scanner_builder->Project(std::move(columns)));
+    ARROW_EXPECT_OK(builder->Project(std::move(columns)));
   }
 
-  ARROW_EXPECT_OK(scanner_builder->Filter(std::move(filter)));
-  ARROW_EXPECT_OK(scanner_builder->UseThreads(use_threads));
-  EXPECT_OK_AND_ASSIGN(auto scanner, scanner_builder->Finish());
+  ARROW_EXPECT_OK(builder->Filter(filter));
+  ARROW_EXPECT_OK(builder->UseThreads(use_threads));
+  EXPECT_OK_AND_ASSIGN(auto scanner, builder->Finish());
   return scanner;
 }
 
-TEST(TestSkyhookCLS, SelectEntireDataset) {
+std::shared_ptr<arrow::dataset::Scanner> GetScannerFromDataset(
+    const std::shared_ptr<arrow::dataset::Dataset>& dataset, std::vector<std::string> columns,
+    arrow::compute::Expression filter, bool use_threads) {
+  EXPECT_OK_AND_ASSIGN(auto scanner_builder, dataset->NewScan());
+	return GetScannerFromBuilder(scanner_builder, std::move(columns), filter, use_threads);
+}
+
+std::shared_ptr<arrow::dataset::ScannerBuilder> GetSkyhookScannerBuilder(
+		const std::shared_ptr<arrow::dataset::Dataset>& dataset,
+    skyhook::SkyhookFragmentScanOptions::pushback_policy_type pushback_policy) {
+	auto scan_options = std::make_shared<arrow::dataset::ScanOptions>();
+  scan_options->fragment_scan_options = std::make_shared<skyhook::SkyhookFragmentScanOptions>(pushback_policy);
+  return std::make_shared<arrow::dataset::ScannerBuilder>(dataset, scan_options);
+}
+
+TEST(TestSkyhookCLS, SelectEntireDatasetPolicyNever) {
   std::string path;
   auto fs = GetFileSystemFromUri("file:///mnt/cephfs/nyc", &path);
   std::vector<std::string> columns;
 
-  auto parquet_format = GetParquetFormat();
-  auto dataset = GetDatasetFromPath(fs, parquet_format, path);
+  auto format = GetParquetFormat();
+  auto dataset = GetDatasetFromPath(fs, format, path);
   auto scanner =
       GetScannerFromDataset(dataset, columns, arrow::compute::literal(true), true);
   EXPECT_OK_AND_ASSIGN(auto table_parquet, scanner->ToTable());
 
   auto skyhook_format = GetSkyhookFormat();
   dataset = GetDatasetFromPath(fs, skyhook_format, path);
-  scanner = GetScannerFromDataset(dataset, columns, arrow::compute::literal(true), true);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::NEVER),
+      columns, arrow::compute::literal(true), true);
+  EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
+
+  ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);
+  ASSERT_EQ(table_parquet->num_rows(), table_skyhook_parquet->num_rows());
+}
+
+TEST(TestSkyhookCLS, SelectEntireDatasetPolicyAlways) {
+  std::string path;
+  auto fs = GetFileSystemFromUri("file:///mnt/cephfs/nyc", &path);
+  std::vector<std::string> columns;
+
+  auto format = GetParquetFormat();
+  auto dataset = GetDatasetFromPath(fs, format, path);
+  auto scanner =
+      GetScannerFromDataset(dataset, columns, arrow::compute::literal(true), true);
+  EXPECT_OK_AND_ASSIGN(auto table_parquet, scanner->ToTable());
+
+  auto skyhook_format = GetSkyhookFormat();
+  dataset = GetDatasetFromPath(fs, skyhook_format, path);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::ALWAYS),
+      columns, arrow::compute::literal(true), true);
   EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
 
   ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);
@@ -134,7 +177,9 @@ TEST(TestSkyhookCLS, SelectFewRows) {
 
   auto skyhook_format = GetSkyhookFormat();
   dataset = GetDatasetFromPath(fs, skyhook_format, path);
-  scanner = GetScannerFromDataset(dataset, columns, filter, true);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::DYNAMIC),
+      columns, filter, true);
   EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
 
   ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);
@@ -154,7 +199,9 @@ TEST(TestSkyhookCLS, SelectFewColumns) {
 
   auto skyhook_format = GetSkyhookFormat();
   dataset = GetDatasetFromPath(fs, skyhook_format, path);
-  scanner = GetScannerFromDataset(dataset, columns, arrow::compute::literal(true), true);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::DYNAMIC),
+      columns, arrow::compute::literal(true), true);
   EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
 
   ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);
@@ -175,7 +222,9 @@ TEST(TestSkyhookCLS, SelectRowsAndColumnsOnPartitionKey) {
 
   auto skyhook_format = GetSkyhookFormat();
   dataset = GetDatasetFromPath(fs, skyhook_format, path);
-  scanner = GetScannerFromDataset(dataset, columns, filter, true);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::DYNAMIC),
+      columns, filter, true);
   EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
 
   ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);
@@ -199,7 +248,9 @@ TEST(TestSkyhookCLS, SelectRowsAndColumnsOnlyOnPartitionKey) {
 
   auto skyhook_format = GetSkyhookFormat();
   dataset = GetDatasetFromPath(fs, skyhook_format, path);
-  scanner = GetScannerFromDataset(dataset, columns, filter, true);
+  scanner = GetScannerFromBuilder(GetSkyhookScannerBuilder(dataset,
+        skyhook::SkyhookFragmentScanOptions::pushback_policy_type::DYNAMIC),
+      columns, filter, true);
   EXPECT_OK_AND_ASSIGN(auto table_skyhook_parquet, scanner->ToTable());
 
   ASSERT_EQ(table_parquet->Equals(*table_skyhook_parquet), 1);

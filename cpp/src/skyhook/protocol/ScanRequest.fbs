@@ -24,6 +24,7 @@ table ScanRequest {
   partition: [ubyte];
   dataset_schema: [ubyte];
   projection_schema: [ubyte];
+  pushback_policy: short;
 }
 
 root_type ScanRequest;

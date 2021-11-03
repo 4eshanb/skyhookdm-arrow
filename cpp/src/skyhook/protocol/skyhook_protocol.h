@@ -25,6 +25,9 @@
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
+// added
+#include "arrow/dataset/file_ipc.h"
+//
 
 #define SCAN_UNKNOWN_ERR_MSG "something went wrong while scanning file fragment"
 #define SCAN_ERR_CODE 25
@@ -34,6 +37,18 @@
 #define SCAN_RES_SER_ERR_CODE 27
 #define SCAN_RES_SER_ERR_MSG "failed to serialize result table"
 
+//added
+#define SCAN_RES_PUSHBACK 28
+
+const std::map<int, arrow::Status> arrow_status_map = {
+  { 25, arrow::Status::Invalid("failed to scan file fragment") },
+  { 26, arrow::Status::Invalid("failed to deserialize scan request")},
+  { 27,  arrow::Status::Invalid("failed to serialize result table")},
+  { 28, arrow::Status::Invalid("pushback")}
+};
+
+//
+
 namespace skyhook {
 
 /// An enum to represent the different
@@ -41,6 +56,23 @@ namespace skyhook {
 struct SkyhookFileType {
   enum type { PARQUET, IPC };
 };
+
+//added
+constexpr char kSkyhookTypeName[] = "skyhook";
+class SkyhookFragmentScanOptions : public arrow::dataset::FragmentScanOptions {
+ public:
+   enum pushback_policy_type {DYNAMIC, ALWAYS, NEVER};
+   explicit SkyhookFragmentScanOptions(pushback_policy_type pushback_policy) : pushback_policy_(pushback_policy) {}
+   SkyhookFragmentScanOptions() : SkyhookFragmentScanOptions(pushback_policy_type::DYNAMIC) {}
+
+   pushback_policy_type pushback_policy() {return pushback_policy_;}
+
+   std::string type_name() const override { return kSkyhookTypeName; }
+
+  private:
+   pushback_policy_type pushback_policy_;
+};
+//
 
 /// A struct encapsulating all the parameters
 /// required to be serialized in the form of flatbuffers for
@@ -52,6 +84,8 @@ struct ScanRequest {
   std::shared_ptr<arrow::Schema> dataset_schema;
   int64_t file_size;
   SkyhookFileType::type file_format;
+  SkyhookFragmentScanOptions::pushback_policy_type pushback_policy;
+
 };
 
 /// Utility functions to serialize and deserialize scan requests and result Arrow tables.

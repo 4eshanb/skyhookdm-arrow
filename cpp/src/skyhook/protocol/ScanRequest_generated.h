@@ -12,15 +12,18 @@ namespace arrow {
 namespace flatbuf {
 
 struct ScanRequest;
+struct ScanRequestBuilder;
 
 struct ScanRequest FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef ScanRequestBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_FILE_SIZE = 4,
     VT_FILE_FORMAT = 6,
     VT_FILTER = 8,
     VT_PARTITION = 10,
     VT_DATASET_SCHEMA = 12,
-    VT_PROJECTION_SCHEMA = 14
+    VT_PROJECTION_SCHEMA = 14,
+    VT_PUSHBACK_POLICY = 16
   };
   int64_t file_size() const {
     return GetField<int64_t>(VT_FILE_SIZE, 0);
@@ -40,6 +43,9 @@ struct ScanRequest FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   const flatbuffers::Vector<uint8_t> *projection_schema() const {
     return GetPointer<const flatbuffers::Vector<uint8_t> *>(VT_PROJECTION_SCHEMA);
   }
+  int16_t pushback_policy() const {
+    return GetField<int16_t>(VT_PUSHBACK_POLICY, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_FILE_SIZE) &&
@@ -52,11 +58,13 @@ struct ScanRequest FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            verifier.VerifyVector(dataset_schema()) &&
            VerifyOffset(verifier, VT_PROJECTION_SCHEMA) &&
            verifier.VerifyVector(projection_schema()) &&
+           VerifyField<int16_t>(verifier, VT_PUSHBACK_POLICY) &&
            verifier.EndTable();
   }
 };
 
 struct ScanRequestBuilder {
+  typedef ScanRequest Table;
   flatbuffers::FlatBufferBuilder &fbb_;
   flatbuffers::uoffset_t start_;
   void add_file_size(int64_t file_size) {
@@ -77,11 +85,13 @@ struct ScanRequestBuilder {
   void add_projection_schema(flatbuffers::Offset<flatbuffers::Vector<uint8_t>> projection_schema) {
     fbb_.AddOffset(ScanRequest::VT_PROJECTION_SCHEMA, projection_schema);
   }
+  void add_pushback_policy(int16_t pushback_policy) {
+    fbb_.AddElement<int16_t>(ScanRequest::VT_PUSHBACK_POLICY, pushback_policy, 0);
+  }
   explicit ScanRequestBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ScanRequestBuilder &operator=(const ScanRequestBuilder &);
   flatbuffers::Offset<ScanRequest> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<ScanRequest>(end);
@@ -96,13 +106,15 @@ inline flatbuffers::Offset<ScanRequest> CreateScanRequest(
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> filter = 0,
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> partition = 0,
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> dataset_schema = 0,
-    flatbuffers::Offset<flatbuffers::Vector<uint8_t>> projection_schema = 0) {
+    flatbuffers::Offset<flatbuffers::Vector<uint8_t>> projection_schema = 0,
+    int16_t pushback_policy = 0) {
   ScanRequestBuilder builder_(_fbb);
   builder_.add_file_size(file_size);
   builder_.add_projection_schema(projection_schema);
   builder_.add_dataset_schema(dataset_schema);
   builder_.add_partition(partition);
   builder_.add_filter(filter);
+  builder_.add_pushback_policy(pushback_policy);
   builder_.add_file_format(file_format);
   return builder_.Finish();
 }
@@ -114,7 +126,8 @@ inline flatbuffers::Offset<ScanRequest> CreateScanRequestDirect(
     const std::vector<uint8_t> *filter = nullptr,
     const std::vector<uint8_t> *partition = nullptr,
     const std::vector<uint8_t> *dataset_schema = nullptr,
-    const std::vector<uint8_t> *projection_schema = nullptr) {
+    const std::vector<uint8_t> *projection_schema = nullptr,
+    int16_t pushback_policy = 0) {
   auto filter__ = filter ? _fbb.CreateVector<uint8_t>(*filter) : 0;
   auto partition__ = partition ? _fbb.CreateVector<uint8_t>(*partition) : 0;
   auto dataset_schema__ = dataset_schema ? _fbb.CreateVector<uint8_t>(*dataset_schema) : 0;
@@ -126,7 +139,8 @@ inline flatbuffers::Offset<ScanRequest> CreateScanRequestDirect(
       filter__,
       partition__,
       dataset_schema__,
-      projection_schema__);
+      projection_schema__,
+      pushback_policy);
 }
 
 inline const org::apache::arrow::flatbuf::ScanRequest *GetScanRequest(const void *buf) {

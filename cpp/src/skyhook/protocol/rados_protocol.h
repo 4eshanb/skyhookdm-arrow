@@ -22,9 +22,28 @@
 #include "arrow/util/make_unique.h"
 
 #include "skyhook/client/file_skyhook.h"
+// added
+#include <rados/objclass.h>
+#include "arrow/status.h"
+#include <sstream>
+//
 
 namespace skyhook {
 namespace rados {
+
+class RadosStatusDetail : public arrow::StatusDetail {
+  public:
+  explicit RadosStatusDetail(int code);
+
+  const char* type_id() const override;
+
+  std::string ToString() const override;
+
+  int code() const;
+
+  private:
+  int code_;
+};
 
 class IoCtxInterface {
  public:

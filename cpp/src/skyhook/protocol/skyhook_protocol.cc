@@ -24,6 +24,10 @@
 #include "arrow/result.h"
 #include "arrow/util/io_util.h"
 
+//added
+#include "arrow/dataset/dataset.h"
+//
+
 namespace skyhook {
 
 namespace flatbuf = org::apache::arrow::flatbuf;
@@ -50,7 +54,7 @@ arrow::Status SerializeScanRequest(ScanRequest& req, ceph::bufferlist* bl) {
 
   auto request = flatbuf::CreateScanRequest(
       builder, req.file_size, static_cast<int>(req.file_format), filter_expression_vector,
-      partition_expression_vector, dataset_schema_vector, projected_schema_vector);
+      partition_expression_vector, dataset_schema_vector, projected_schema_vector, static_cast<int>(req.pushback_policy));
   builder.Finish(request);
   uint8_t* buf = builder.GetBufferPointer();
   int size = builder.GetSize();
@@ -84,7 +88,9 @@ arrow::Status DeserializeScanRequest(ceph::bufferlist& bl, ScanRequest* req) {
                         arrow::ipc::ReadSchema(&dataset_schema_reader, &empty_memo));
 
   req->file_size = request->file_size();
-  req->file_format = (SkyhookFileType::type)request->file_format();
+  req->pushback_policy = static_cast<SkyhookFragmentScanOptions::pushback_policy_type>(request->pushback_policy());
+  //req->file_format = (SkyhookFileType::type)request->file_format();
+  req->file_format = static_cast<SkyhookFileType::type>(request->file_format());
   return arrow::Status::OK();
 }
 
@@ -123,14 +129,7 @@ arrow::Status DeserializeTable(ceph::bufferlist& bl, bool use_threads,
 arrow::Status ExecuteObjectClassFn(const std::shared_ptr<rados::RadosConn>& connection,
                                    const std::string& oid, const std::string& fn,
                                    ceph::bufferlist& in, ceph::bufferlist& out) {
-  int e = arrow::internal::ErrnoFromStatus(connection->io_ctx->exec(
-      oid.c_str(), connection->ctx->ceph_cls_name.c_str(), fn.c_str(), in, out));
-
-  if (e == SCAN_ERR_CODE) return arrow::Status::Invalid(SCAN_ERR_MSG);
-  if (e == SCAN_REQ_DESER_ERR_CODE) return arrow::Status::Invalid(SCAN_REQ_DESER_ERR_MSG);
-  if (e == SCAN_RES_SER_ERR_CODE) return arrow::Status::Invalid(SCAN_RES_SER_ERR_MSG);
-  if (e != 0) return arrow::Status::Invalid(SCAN_UNKNOWN_ERR_MSG);
-  return arrow::Status::OK();
+  return connection->io_ctx->exec(oid.c_str(), connection->ctx->ceph_cls_name.c_str(), fn.c_str(), in, out);
 }
 
 }  // namespace skyhook

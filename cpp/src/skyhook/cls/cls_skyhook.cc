@@ -18,6 +18,27 @@
 
 #include <memory>
 
+// added
+#include <sys/sysinfo.h>
+//#include "arrow/dataset/file_skyhook.h"
+#include "arrow/dataset/scanner.h"
+#include <string>
+#include <boost/utility/string_view.hpp>
+#include <boost/optional/optional_io.hpp>
+#include <boost/tuple/tuple.hpp>
+#include "parquet/arrow/reader.h"
+#include "parquet/file_reader.h"
+#include <sstream>
+#include <iostream>
+#include <string_view>
+#include "arrow/util/logging.h"
+#include <thread>
+#include <assert.h>
+#include <sched.h>
+#include <stdbool.h>
+#include <unistd.h>
+//
+
 #include "arrow/compute/exec/expression.h"
 #include "arrow/dataset/dataset.h"
 #include "arrow/dataset/file_ipc.h"
@@ -30,6 +51,12 @@
 
 CLS_VER(1, 0)
 CLS_NAME(skyhook)
+
+//added
+// MIN_AVAIL_RAM
+#define MIN_AVAIL_RAM 0
+#define MAX_CPU_UTIL 0
+//
 
 cls_handle_t h_class;
 cls_method_handle_t h_scan_op;
@@ -201,6 +228,64 @@ static arrow::Result<std::shared_ptr<arrow::Table>> ScanParquetObject(
   return result_table;
 }
 
+static void MaybePushback(const cls_method_context_t& hctx,
+    int64_t file_size, ceph::bufferlist *out)
+{
+  struct sysinfo info;
+  ARROW_CHECK_LT(sysinfo(&info), 0) << "Fail to get sysinfo: " << std::strerror(errno);
+
+  auto parquet_reader = parquet::ParquetFileReader::Open(
+      std::make_shared<RandomAccessObject>(hctx, file_size));
+  auto file_metadata = parquet_reader->metadata();
+
+  int64_t file_uncompressed_size = 0;
+  for (int r = 0; r < file_metadata->num_row_groups(); ++r) {
+    auto row_group_metadata = file_metadata->RowGroup(r);
+    for (int c = 0; c < file_metadata->num_columns(); ++c) {
+      file_uncompressed_size += row_group_metadata->ColumnChunk(c)->total_uncompressed_size();
+    }
+  }
+
+  CLS_LOG(0, "#### file_uncompressed_size %lu", file_uncompressed_size);
+
+  // TODO: Use free ram in sysinfo instead of MIN_AVAIL_RAM
+  if (file_uncompressed_size > MIN_AVAIL_RAM) {
+    cls_cxx_read(hctx, 0, file_size, out);
+    return;
+  }
+
+  const auto processor_count = std::thread::hardware_concurrency();
+  cpu_set_t mask;
+  long nproc;
+  nproc = sysconf(_SC_NPROCESSORS_ONLN);
+
+  int num_cpu_avail = 0;
+  for (int i = 0; i < nproc; i++) {
+      //CLS_LOG(0, "#### %d ", CPU_ISSET(i, &mask));
+      num_cpu_avail +=  CPU_ISSET(i, &mask);
+  }
+  CLS_LOG(0, "#### total affinity: %d ", num_cpu_avail);
+  CLS_LOG(0, "#### \n");
+  CLS_LOG(0, "#### sched_getcpu = %d\n", sched_getcpu());
+
+
+  // TODO: get real info loads[0] value. Google this
+  // start benchmarking. Use parsec
+
+  float f_load = 1.f / (1 << SI_LOAD_SHIFT);
+
+  // TODO: compare these values with the uptime result
+
+  CLS_LOG(0, "#### info.loads[0] 1 %f", info.loads[0] * f_load);
+  CLS_LOG(0, "#### info.loads[0] 2 %f", info.loads[0] * f_load * 100/nproc);
+  CLS_LOG(0, "#### processor count %d", processor_count);
+
+
+  if (info.loads[0] > MAX_CPU_UTIL) {
+    cls_cxx_read(hctx, 0, file_size, out);
+  }
+}
+
 /// \brief The scan operation to execute on the Ceph OSD nodes. The scan request is
 /// deserialized, the object is scanned, and the resulting table is serialized
 /// and sent back to the client.
@@ -214,11 +299,25 @@ static int scan_op(cls_method_context_t hctx, ceph::bufferlist* in,
   arrow::Status s;
   skyhook::ScanRequest req;
 
+  auto pushback_policy = req.pushback_policy;
+  //CLS_LOG(0, "#### pushback policy type %d", pushback_policy);
+
   // Deserialize the scan request.
   if (!(s = skyhook::DeserializeScanRequest(*in, &req)).ok()) {
     LogSkyhookError(s.message());
     return SCAN_REQ_DESER_ERR_CODE;
   }
+
+  if (pushback_policy == skyhook::SkyhookFragmentScanOptions::pushback_policy_type::ALWAYS) {
+    cls_cxx_read(hctx, 0, req.file_size, out);
+  } else if (pushback_policy == skyhook::SkyhookFragmentScanOptions::pushback_policy_type::DYNAMIC) {
+    MaybePushback(hctx, req.file_size, out);
+  }
+
+  if (out->length()) {
+    return SCAN_RES_PUSHBACK;
+  }
+
 
   // Scan the object.
   std::shared_ptr<arrow::Table> table;
@@ -250,13 +349,11 @@ static int scan_op(cls_method_context_t hctx, ceph::bufferlist* in,
   }
 
   // Serialize the resultant table to send back to the client.
-  ceph::bufferlist bl;
-  if (!(s = skyhook::SerializeTable(table, &bl)).ok()) {
+  if (!(s = skyhook::SerializeTable(table, out)).ok()) {
     LogSkyhookError(s.message());
     return SCAN_RES_SER_ERR_CODE;
   }
 
-  *out = std::move(bl);
   return 0;
 }
 

@@ -24,7 +24,20 @@
 #include "arrow/dataset/file_parquet.h"
 #include "arrow/util/compression.h"
 
+#include <iostream>
+#include "arrow/io/api.h"
+#include <flatbuffers/flatbuffers.h>
+#include "arrow/ipc/api.h"
+#include "arrow/dataset/file_base.h"
+#include "arrow/dataset/file_parquet.h"
+#include "arrow/dataset/scanner.h"
+#include "arrow/dataset/dataset_internal.h"
+//
+
 namespace skyhook {
+  //added
+  using arrow::internal::checked_cast;
+  //
 
 /// A ScanTask to scan a file fragment in Skyhook format.
 class SkyhookScanTask : public arrow::dataset::ScanTask {
@@ -55,21 +68,68 @@ class SkyhookScanTask : public arrow::dataset::ScanTask {
     req.file_size = st.st_size;
     req.file_format = file_format_;
 
+    ARROW_ASSIGN_OR_RAISE(auto skyhook_fragment_scan_options,
+                arrow::dataset::GetFragmentScanOptions<skyhook::SkyhookFragmentScanOptions>(skyhook::kSkyhookTypeName, options_.get(),
+                std::make_shared<skyhook::SkyhookFragmentScanOptions>()));
+
+    req.pushback_policy = skyhook_fragment_scan_options->pushback_policy();
+
     /// Serialize the ScanRequest into a ceph bufferlist.
     ceph::bufferlist request;
     RETURN_NOT_OK(skyhook::SerializeScanRequest(req, &request));
 
     /// Execute the Ceph object class method `scan_op`.
     ceph::bufferlist result;
-    RETURN_NOT_OK(doa_->Exec(st.st_ino, "scan_op", request, result));
 
-    /// Read RecordBatches from the result bufferlist. Since, this step might use
-    /// threads for decompressing compressed batches, to avoid running into
-    /// [ARROW-12597], we switch off threaded decompression to avoid nested threading
-    /// scenarios when scan tasks are executed in parallel by the CpuThreadPool.
+    arrow::Status s = doa_->Exec(st.st_ino, "scan_op", request, result);
+    auto& detail = checked_cast<const skyhook::rados::RadosStatusDetail&>(*s.detail());
+
     arrow::RecordBatchVector batches;
-    RETURN_NOT_OK(skyhook::DeserializeTable(result, !options_->use_threads, &batches));
-    return arrow::MakeVectorIterator(std::move(batches));
+
+    if (detail.code() != SCAN_RES_PUSHBACK) {
+      /// Read RecordBatches from the result bufferlist. Since, this step might use
+      /// threads for decompressing compressed batches, to avoid running into
+      /// [ARROW-12597], we switch off threaded decompression to avoid nested threading
+      /// scenarios when scan tasks are executed in parallel by the CpuThreadPool.
+      RETURN_NOT_OK(skyhook::DeserializeTable(result, !options_->use_threads, &batches));
+      return arrow::MakeVectorIterator(std::move(batches));
+    }
+
+    auto buffer = std::make_shared<arrow::Buffer>((uint8_t*) result.c_str(), result.length());
+    auto buffer_reader = std::make_shared<arrow::io::BufferReader>(buffer);
+
+    auto source = arrow::dataset::FileSource(buffer);
+
+    if (req.file_format == skyhook::SkyhookFileType::type::PARQUET) {
+      auto format = std::make_shared<arrow::dataset::ParquetFileFormat>();
+      auto fragment_scan_options = std::make_shared<arrow::dataset::ParquetFragmentScanOptions>();
+
+      ARROW_ASSIGN_OR_RAISE(auto fragment, format->MakeFragment(source, req.partition_expression));
+      auto options = std::make_shared<arrow::dataset::ScanOptions>();
+      auto builder = std::make_shared<arrow::dataset::ScannerBuilder>(req.dataset_schema,
+                      std::move(fragment), std::move(options));
+
+      ARROW_RETURN_NOT_OK(builder->Filter(req.filter_expression));
+      ARROW_RETURN_NOT_OK(builder->Project(req.projection_schema->field_names()));
+      ARROW_RETURN_NOT_OK(builder->UseThreads(true));
+      ARROW_RETURN_NOT_OK(builder->FragmentScanOptions(fragment_scan_options));
+
+      ARROW_ASSIGN_OR_RAISE(auto scanner, builder->Finish());
+      ARROW_ASSIGN_OR_RAISE(auto table, scanner->ToTable());
+
+      auto options_read = arrow::ipc::IpcReadOptions::Defaults();
+      options_read.use_threads = !options_->use_threads;
+
+      ARROW_ASSIGN_OR_RAISE(auto reader, scanner->ToRecordBatchReader());
+      ARROW_RETURN_NOT_OK(reader->ReadAll(&batches));
+
+      return arrow::MakeVectorIterator(batches);
+    } else if (req.file_format == skyhook::SkyhookFileType::type::IPC) {
+      std::cout << "eh";
+      return arrow::MakeVectorIterator(batches);
+    } else {
+      return arrow::Status::Invalid("Unsupported file format");
+    }
   }
 
  protected:

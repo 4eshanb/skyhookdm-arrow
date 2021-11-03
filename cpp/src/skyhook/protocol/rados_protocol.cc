@@ -20,16 +20,42 @@
 
 #include <iostream>
 #include <vector>
+//added
+#include <rados/objclass.h>
+#include "arrow/status.h"
+#include <sstream>
+//
 
 namespace skyhook {
 namespace rados {
 
+const char* kStatusDetailTypeId = "skyhook::rados::RadosStatusDetail";
+
+RadosStatusDetail::RadosStatusDetail (int code): code_(code) {}
+const char* RadosStatusDetail::type_id() const { return kStatusDetailTypeId; }
+
+std::string RadosStatusDetail::ToString() const {
+  std::stringstream ss;
+  ss << "OK [code " << code_ << "]";
+  return ss.str();
+}
+
+int RadosStatusDetail::code() const  { return code_; }
+
+template <typename... Args>
+arrow::Status StatusFromOK(int detail_code) {
+  return arrow::Status::FromDetailAndArgs(arrow::StatusCode::OK,
+         std::make_shared<RadosStatusDetail>(detail_code),
+         "Rados operation success");
+}
+
 template <typename... Args>
 arrow::Status GetStatusFromReturnCode(int code, Args&&... args) {
-  if (code)
-    return arrow::internal::StatusFromErrno(code, arrow::StatusCode::Invalid,
-                                            std::forward<Args>(args)...);
-  return arrow::Status::OK();
+  if(code >= 0) {
+    return StatusFromOK(code);
+  } else {
+    return arrow::internal::StatusFromErrno(code, arrow::StatusCode::Invalid, std::forward<Args>(args)...);
+  }
 }
 
 arrow::Status IoCtxInterface::read(const std::string& oid, ceph::bufferlist& bl,
@@ -80,11 +106,18 @@ arrow::Status RadosConn::Connect() {
     return arrow::Status::OK();
   }
 
-  ARROW_RETURN_NOT_OK(
-      rados->init2(ctx->ceph_user_name.c_str(), ctx->ceph_cluster_name.c_str(), 0));
-  ARROW_RETURN_NOT_OK(rados->conf_read_file(ctx->ceph_config_path.c_str()));
-  ARROW_RETURN_NOT_OK(rados->connect());
-  ARROW_RETURN_NOT_OK(rados->ioctx_create(ctx->ceph_data_pool.c_str(), io_ctx.get()));
+  auto status = rados->init2(ctx->ceph_user_name.c_str(), ctx->ceph_cluster_name.c_str(), 0);
+  ARROW_RETURN_IF(status.code() != arrow::StatusCode::OK, status);
+
+  status = rados->conf_read_file(ctx->ceph_config_path.c_str());
+  ARROW_RETURN_IF(status.code() != arrow::StatusCode::OK, status);
+
+  status = rados->connect();
+  ARROW_RETURN_IF(status.code() != arrow::StatusCode::OK, status);
+
+  status = rados->ioctx_create(ctx->ceph_data_pool.c_str(), io_ctx.get());
+  ARROW_RETURN_IF(status.code() != arrow::StatusCode::OK, status);
+
   return arrow::Status::OK();
 }
 
