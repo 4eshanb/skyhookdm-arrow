@@ -37,6 +37,7 @@
 #include <sched.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include "errno.h"
 //
 
 #include "arrow/compute/exec/expression.h"
@@ -53,9 +54,7 @@ CLS_VER(1, 0)
 CLS_NAME(skyhook)
 
 //added
-// MIN_AVAIL_RAM
-#define MIN_AVAIL_RAM 0
-#define MAX_CPU_UTIL 0
+#define MAX_CPU_UTIL 0.9
 //
 
 cls_handle_t h_class;
@@ -232,7 +231,9 @@ static void MaybePushback(const cls_method_context_t& hctx,
     int64_t file_size, ceph::bufferlist *out)
 {
   struct sysinfo info;
-  ARROW_CHECK_LT(sysinfo(&info), 0) << "Fail to get sysinfo: " << std::strerror(errno);
+  int status = sysinfo(&info);
+
+  ARROW_CHECK_EQ(status, 0) << "Fail to get sysinfo: " << std::strerror(errno);
 
   auto parquet_reader = parquet::ParquetFileReader::Open(
       std::make_shared<RandomAccessObject>(hctx, file_size));
@@ -246,10 +247,7 @@ static void MaybePushback(const cls_method_context_t& hctx,
     }
   }
 
-  CLS_LOG(0, "#### file_uncompressed_size %lu", file_uncompressed_size);
-
-  // TODO: Use free ram in sysinfo instead of MIN_AVAIL_RAM
-  if (file_uncompressed_size > MIN_AVAIL_RAM) {
+  if (file_uncompressed_size > info.freeram) {
     cls_cxx_read(hctx, 0, file_size, out);
     return;
   }
@@ -264,26 +262,16 @@ static void MaybePushback(const cls_method_context_t& hctx,
       //CLS_LOG(0, "#### %d ", CPU_ISSET(i, &mask));
       num_cpu_avail +=  CPU_ISSET(i, &mask);
   }
-  CLS_LOG(0, "#### total affinity: %d ", num_cpu_avail);
-  CLS_LOG(0, "#### \n");
-  CLS_LOG(0, "#### sched_getcpu = %d\n", sched_getcpu());
 
 
-  // TODO: get real info loads[0] value. Google this
-  // start benchmarking. Use parsec
+  auto constexpr static f_load = 1.f / (1 << SI_LOAD_SHIFT);
 
-  float f_load = 1.f / (1 << SI_LOAD_SHIFT);
-
-  // TODO: compare these values with the uptime result
-
-  CLS_LOG(0, "#### info.loads[0] 1 %f", info.loads[0] * f_load);
-  CLS_LOG(0, "#### info.loads[0] 2 %f", info.loads[0] * f_load * 100/nproc);
-  CLS_LOG(0, "#### processor count %d", processor_count);
-
-
-  if (info.loads[0] > MAX_CPU_UTIL) {
+  // TODO: Fork Apache arrow and build your result on top of it 
+  
+  if (info.loads[0] * f_load > MAX_CPU_UTIL * nproc) {
     cls_cxx_read(hctx, 0, file_size, out);
   }
+
 }
 
 /// \brief The scan operation to execute on the Ceph OSD nodes. The scan request is
@@ -298,8 +286,6 @@ static int scan_op(cls_method_context_t hctx, ceph::bufferlist* in,
   // Components required to construct a File fragment.
   arrow::Status s;
   skyhook::ScanRequest req;
-
-  auto pushback_policy = req.pushback_policy;
   //CLS_LOG(0, "#### pushback policy type %d", pushback_policy);
 
   // Deserialize the scan request.
@@ -307,6 +293,8 @@ static int scan_op(cls_method_context_t hctx, ceph::bufferlist* in,
     LogSkyhookError(s.message());
     return SCAN_REQ_DESER_ERR_CODE;
   }
+
+  auto pushback_policy = req.pushback_policy;
 
   if (pushback_policy == skyhook::SkyhookFragmentScanOptions::pushback_policy_type::ALWAYS) {
     cls_cxx_read(hctx, 0, req.file_size, out);
